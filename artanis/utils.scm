@@ -41,7 +41,8 @@
   #:use-module (web request)
   #:use-module ((rnrs)
                 #:select (get-bytevector-all utf8->string put-bytevector
-                          bytevector-u8-ref string->utf8 bytevector-length))
+                          bytevector-u8-ref string->utf8 bytevector-length
+                          make-bytevector bytevector-s32-native-ref))
   #:export (regexp-split hash-keys cat bv-cat get-global-time
             get-local-time string->md5 unsafe-random string-substitute
             get-file-ext get-global-date get-local-date uri-decode
@@ -68,7 +69,7 @@
             handle-existing-file check-drawing-method current-toplevel
             subbv->string subbv=? bv-read-line bv-read-delimited put-bv
             bv-u8-index bv-u8-index-right build-bv-lookup-table filesize
-            plist-remove)
+            make-blob-pointer c/struct-sizeof errno plist-remove)
   #:re-export (the-environment))
 
 ;; There's a famous rumor that 'urandom' is safer, so we pick it.
@@ -917,6 +918,48 @@
    ((>= size Kbytes)
     (format #f "~,1fKiB" (/ size Kbytes)))
    (else (format #f "~a Bytes" size))))
+
+(define (make-blob-pointer len)
+  (bytevector->pointer (make-bytevector len)))
+
+;; FIXME: DO NOT USE! We need to handle packed situation properly!!!
+(define (c/struct-sizeof meta)
+  (/ (apply +
+            (map (lambda (m) (if (list? m) (c/struct-sizeof m) (sizeof m)))
+                 meta))
+     4))
+
+(define %libc-errno-pointer
+  ;; Glibc's 'errno' pointer.
+  (let ((errno-loc (dynamic-func "__errno_location" (dynamic-link))))
+    (and errno-loc
+         (let ((proc (pointer->procedure '* errno-loc '())))
+           (proc)))))
+
+(define errno
+  (if %libc-errno-pointer
+      (let ((bv (pointer->bytevector %libc-errno-pointer (sizeof int))))
+        (lambda ()
+          "Return the current errno."
+          ;; XXX: We assume that nothing changes 'errno' while we're doing all this.
+          ;; In particular, that means that no async must be running here.
+
+          ;; Use one of the fixed-size native-ref procedures because they are
+          ;; optimized down to a single VM instruction, which reduces the risk
+          ;; that we fiddle with 'errno' (needed on Guile 2.0.5, libc 2.11.)
+          (let-syntax ((ref (lambda (s)
+                              (syntax-case s ()
+                                ((_ bv)
+                                 (case (sizeof int)
+                                   ((4)
+                                    #'(bytevector-s32-native-ref bv 0))
+                                   ((8)
+                                    #'(bytevector-s64-native-ref bv 0))
+                                   (else
+                                    (error "unsupported 'int' size"
+                                           (sizeof int)))))))))
+            (ref bv))))
+      (lambda () 0)))
 
 (define* (plist-remove lst k #:optional (no-value? #f))
   (let lp((next lst) (kk '__) (ret '()))
