@@ -19,6 +19,7 @@
 
 (define-module (artanis server epoll)
   #:use-module (artanis utils)
+  #:use-module (artanis config)
   #:use-module (system foreign))
 
 (define-public EPOLL_CLOEXEC 2000000)
@@ -35,8 +36,8 @@
 (define-public EPOLLERR #x008)
 (define-public EPOLLHUP #x010)
 (define-public EPOLLRDHUP #x2000)
-(define-public EPOLLONESHOT (expt 1 30))
-(define-public EPOLLET (expt 1 31))
+(define-public EPOLLONESHOT (ash 1 30))
+(define-public EPOLLET (ash 1 31))
 
 ;; Valid opcodes ( "op" parameter ) to issue to epoll_ctl.
 (define-public EPOLL_CTL_ADD 1) ; Add a file decriptor to the interface.
@@ -46,8 +47,7 @@
 (define-public epoll-data-meta (list '* int uint32 uint64))
 (define *default-epoll-data* (list %null-pointer 0 0 0))
 (define-public epoll-data-size (c/struct-sizeof epoll-data-meta))
-(define-public (make-epoll-data)
-  (make-c-struct epoll-data-meta *default-epoll-data*))
+(define-public (make-epoll-data) *default-epoll-data*)
 
 (define-public (epoll-data-ptr ed) (car ed))
 (define-public (epoll-data-ptr-set! ed ptr)
@@ -64,8 +64,9 @@
 
 (define-public epoll-event-meta (list uint32 epoll-data-meta))
 (define *default-epoll-event* (list 0 *default-epoll-data*))
-(define-public (make-epoll-event)
-  (make-c-struct epoll-event-meta *default-epoll-event*))
+(define epoll-event-size (c/struct-sizeof epoll-event-meta))
+(define-public (make-epoll-event fd events)
+  (list events (%null-pointer fd 0 0)))
 (define (parse-epoll-event e)
   (parse-c-struct epoll-event-meta e))
 
@@ -75,6 +76,10 @@
 (define-public (epoll-event-data ee) (cadr ee))
 (define-public (epoll-event-data-set! ee data)
   (list-set! ee 1 data))
+
+(define-public (make-epoll-event-set)
+  (let ((max (1+ (get-conf '(server workqueue maxlen)))))
+    (make-blob-pointer (* max epoll-event-size))))
 
 ;; Creates an epoll instance.  Returns an fd for the new instance.
 ;; The "size" parameter is a hint specifying the number of file
@@ -124,14 +129,18 @@
                       (list int int int '*)))
 
 (define-public (epoll-ctl epfd op fd event)
-  (let* ((ret (%epoll-ctl epfd op fd event))
+  (let* ((ret (%epoll-ctl epfd op fd (make-c-struct epoll-event-meta event)))
          (err (errno)))
     (cond
      ((zero? ret) ret)
      (else
       (throw 'system-error "epoll-ctl" "~S: ~A"
-             (list epfd op fd (parse-epoll-event event) (strerror err))
+             (list epfd op fd event (strerror err))
              (list err))))))
+
+;; NOTE: do NOT use this function outside this module!!!
+(define (epoll-event-set->list ees len)
+  (parse-c-struct ees (make-list len *default-epoll-event*)))
 
 ;; Wait for events on an epoll instance "epfd". Returns the number of
 ;; triggered events returned in "events" buffer. Or -1 in case of
@@ -145,14 +154,15 @@
                       (dynamic-func "epoll_wait" (dynamic-link))
                       (list int '* int int)))
 
-(define-public (epoll-wait epfd events maxevents timeout)
-  (let* ((ret (%epoll-wait epfd events maxevents timeout))
+(define-public (epoll-wait epfd events timeout)
+  (let* ((maxevents (get-conf '(server workqueue maxlen)))
+         (ret (%epoll-wait epfd events maxevents timeout))
          (err (errno)))
     (cond
-     ((>= ret 0) ret)
+     ((>= ret 0) (epoll-event-set->list events ret))
      (else
       (throw 'system-error "epoll-wait" "~S: ~A"
-             (list epfd (parse-epoll-event event) maxevents timeout(strerror err))
+             (list epfd events maxevents timeout(strerror err))
              (list err))))))
 
 ;; Same as epoll_wait, but the thread's signal mask is temporarily
@@ -162,13 +172,13 @@
                       (dynamic-func "epoll_pwait" (dynamic-link))
                       (list int '* int int '*)))
 
-(define-public (epoll-pwait epfd events maxevents timeout sigmask)
-  (let* ((ret (%epoll-pwait epfd events maxevents timeout sigmask))
+(define-public (epoll-pwait epfd events timeout sigmask)
+  (let* ((maxevents (get-conf '(server workqueue maxlen)))
+         (ret (%epoll-pwait epfd events maxevents timeout sigmask))
          (err (errno)))
     (cond
-     ((>= ret 0) ret)
+     ((>= ret 0) (epoll-event-set->list events ret))
      (else
       (throw 'system-error "epoll-pwait" "~S: ~A"
-             (list epfd (parse-epoll-event event) maxevents timeout
-                   sigmask (strerror err))
+             (list epfd events maxevents timeout sigmask (strerror err))
              (list err))))))
