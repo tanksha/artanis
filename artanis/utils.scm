@@ -923,7 +923,9 @@
   (bytevector->pointer (make-bytevector len)))
 
 (define (c/struct-sizeof meta)
-  (apply + (map sizeof meta)))
+  (apply +
+         (map (lambda (m) (if (list? m) (c/struct-sizeof m) (sizeof m)))
+              meta)))
 
 (define %libc-errno-pointer
   ;; Glibc's 'errno' pointer.
