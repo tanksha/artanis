@@ -52,6 +52,7 @@
     ((server charset) "utf-8")
     ((server syspage path) "/etc/artanis/pages")
     ((server workers) 1)
+    ((server workqueue maxlen) 64)
 
     ;; for host namespace
     ((host addr) "0.0.0.0")
