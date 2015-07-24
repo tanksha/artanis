@@ -922,10 +922,12 @@
 (define (make-blob-pointer len)
   (bytevector->pointer (make-bytevector len)))
 
+;; FIXME: DO NOT USE! We need to handle packed situation properly!!!
 (define (c/struct-sizeof meta)
-  (apply +
-         (map (lambda (m) (if (list? m) (c/struct-sizeof m) (sizeof m)))
-              meta)))
+  (/ (apply +
+            (map (lambda (m) (if (list? m) (c/struct-sizeof m) (sizeof m)))
+                 meta))
+     4))
 
 (define %libc-errno-pointer
   ;; Glibc's 'errno' pointer.
