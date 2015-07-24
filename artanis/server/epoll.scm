@@ -20,6 +20,12 @@
 (define-module (artanis server epoll)
   #:use-module (artanis utils)
   #:use-module (artanis config)
+  #:use-module ((rnrs)
+                #:select (bytevector-s32-native-ref
+                          bytevector-s32-native-set!
+                          bytevector-u32-native-ref
+                          bytevector-u32-native-set!
+                          make-bytevector))
   #:use-module (system foreign))
 
 (define-public EPOLL_CLOEXEC 2000000)
@@ -68,9 +74,7 @@
 (define-public EPOLL_CTL_MOD 3) ; Change file decriptor epoll_event structure.
 
 (define-public epoll-data-meta (list '* int uint32 uint64))
-(define *default-epoll-data* (list %null-pointer 0 0 0))
 (define-public epoll-data-size (c/struct-sizeof epoll-data-meta))
-(define-public (make-epoll-data) *default-epoll-data*)
 
 (define-public (epoll-data-ptr ed) (car ed))
 (define-public (epoll-data-ptr-set! ed ptr)
@@ -86,10 +90,11 @@
   (list-set! (cadr ed) 3 u64))
 
 (define-public epoll-event-meta (list uint32 epoll-data-meta))
-(define *default-epoll-event* (list 0 *default-epoll-data*))
-(define epoll-event-size (c/struct-sizeof epoll-event-meta))
 (define-public (make-epoll-event fd events)
-  (list events (list %null-pointer fd 0 0)))
+  (let ((ees (make-bytevector %sizeof-struct-epoll-event)))
+    (bytevector-s32-native-set! ees (fd-offset 0) fd)
+    (bytevector-u32-native-set! ees (events-offset 0) events)
+    ees))
 (define (parse-epoll-event e)
   (parse-c-struct epoll-event-meta e))
 
@@ -100,9 +105,31 @@
 (define-public (epoll-event-data-set! ee data)
   (list-set! ee 1 data))
 
+;; FIXME: These sizes are fine on x64, but I'm not sure for i32
+(define %sizeof-struct-epoll-event 12)
+(define %offsetof-struct-epoll-event-fd 4)
+
+(define (fd-offset n)
+  (+ (* n %sizeof-struct-epoll-event)
+     %offsetof-struct-epoll-event-fd))
+
+(define (events-offset n)
+  (* n %sizeof-struct-epoll-event))
+
+(define epoll-guardian (make-guardian))
+(define (pump-epoll-guardian)
+  (let ((ees (epoll-guardian)))
+    (when ees
+      (format (current-error-port)
+              "[WARN] epoll-event-set was pumped, which I dislike!~%")
+      (pump-epoll-guardian))))
+(add-hook! after-gc-hook pump-epoll-guardian)
+
 (define-public (make-epoll-event-set)
-  (let ((max (1+ (get-conf '(server workqueue maxlen)))))
-    (make-blob-pointer (* max epoll-event-size))))
+  (let* ((max (get-conf '(server workqueue maxlen)))
+         (ees (make-bytevector (* max epoll-event-size))))
+    (epoll-guardian ees)
+    ees))
 
 ;; Creates an epoll instance.  Returns an fd for the new instance.
 ;; The "size" parameter is a hint specifying the number of file
@@ -152,7 +179,7 @@
                       (list int int int '*)))
 
 (define-public (epoll-ctl epfd op fd event)
-  (let* ((ret (%epoll-ctl epfd op fd (make-c-struct epoll-event-meta event)))
+  (let* ((ret (%epoll-ctl epfd op fd (bytevector->pointer event)));;(make-c-struct epoll-event-meta event)))
          (err (errno)))
     (cond
      ((zero? ret) ret)
@@ -162,8 +189,14 @@
              (list err))))))
 
 ;; NOTE: do NOT use this function outside this module!!!
-(define (epoll-event-set->list ees len)
-  (parse-c-struct ees (make-list len epoll-event-meta)))
+(define (epoll-event-set->list ees nfds)
+  (let lp((i 0) (ret '()))
+    (if (< i nfds)
+        (lp (1+ i)
+            (acons (bytevector-s32-native-ref ees (fd-offset i))
+                   (bytevector-u32-native-ref ees (events-offset i))
+                   ret))
+        ret)))
 
 ;; Wait for events on an epoll instance "epfd". Returns the number of
 ;; triggered events returned in "events" buffer. Or -1 in case of
@@ -179,13 +212,13 @@
 
 (define-public (epoll-wait epfd events timeout)
   (let* ((maxevents (get-conf '(server workqueue maxlen)))
-         (ret (%epoll-wait epfd events maxevents timeout))
+         (ret (%epoll-wait epfd (bytevector->pointer events) maxevents timeout))
          (err (errno)))
     (cond
      ((>= ret 0) (epoll-event-set->list events ret))
      (else
       (throw 'system-error "epoll-wait" "~S: ~A"
-             (list epfd events maxevents timeout(strerror err))
+             (list epfd events maxevents timeout (strerror err))
              (list err))))))
 
 ;; Same as epoll_wait, but the thread's signal mask is temporarily
@@ -197,7 +230,7 @@
 
 (define-public (epoll-pwait epfd events maxevents timeout sigmask)
   (let* ((maxevents (get-conf '(server workqueue maxlen)))
-         (ret (%epoll-pwait epfd events maxevents timeout sigmask))
+         (ret (%epoll-pwait epfd (bytevector->pointer events) maxevents timeout sigmask))
          (err (errno)))
     (cond
      ((>= ret 0) (epoll-event-set->list events ret))
