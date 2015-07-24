@@ -25,18 +25,41 @@
 (define-public EPOLL_CLOEXEC 2000000)
 (define-public EPOLL_NONBLOCK 4000)
 
-(define-public EPOLLIN #x001)
-(define-public EPOLLPRI #x002)
-(define-public EPOLLOUT #x004)
-(define-public EPOLLRDNORM #x040)
-(define-public EPOLLRDBAND #x080)
-(define-public EPOLLWRNORM #x100)
-(define-public EPOLLWRBAND #x200)
-(define-public EPOLLMSG #x400)
+(define-public EPOLLIN #x001) ; The associated file is available for read operations.
+(define-public EPOLLRDNORM #x040) ; identical to EPOLLIN
+
+;; EPOLLPRI is a modifier flag and always augments some other event (such as EPOLLERR).
+;; It's use is subsystem dependent, as it may mean somewhat different things depending
+;; on what purpose associated file descriptor serves.
+(define-public EPOLLPRI #x002) ; There is urgent data available for read operations.
+
+(define-public EPOLLOUT #x004) ; The associated file is available for write operations. 
+(define-public EPOLLWRNORM #x100) ; identical to EPOLLOUT
+
+;; on some sockets there will be the data send with MSG_OOB flag passed to socket.
+(define-public EPOLLRDBAND #x080) ; out of band data on the descriptor for read operations.
+(define-public EPOLLWRBAND #x200) ; out of band data on the descriptor for write operations.
+
+(define-public EPOLLMSG #x400) ; unused by the kernel and appears to serve no purpose.
+
+;; Error condition happened on the associated file descriptor.  epoll_wait(2) will always
+;; wait for this event; it is not necessary to set it in events.
 (define-public EPOLLERR #x008)
-(define-public EPOLLHUP #x010)
-(define-public EPOLLRDHUP #x2000)
+
+;; Hang up happened on the associated file descriptor.  epoll_wait(2) will always wait for
+;; this event it is not necessary to set it in events.
+(define-public EPOLLHUP #x010) ; signals an unexpected close of the socket, i.e. usually an internal error
+
+(define-public EPOLLRDHUP #x2000) ; detect peer shutdown
+
+;; Sets the one-shot behavior for the associated file descriptor.  This means that after
+;; an event is pulled out with epoll_wait(2) the associated file descriptor is internally
+;; disabled and no other events will be reported by the epoll interface.  The user must
+;; call epoll_ctl() with EPOLL_CTL_MOD to rearm the file descriptor with a new event mask.
 (define-public EPOLLONESHOT (ash 1 30))
+
+;; Sets the Edge Triggered behavior for the associated file descriptor.  The default
+;; behavior for epoll is Level Triggered.
 (define-public EPOLLET (ash 1 31))
 
 ;; Valid opcodes ( "op" parameter ) to issue to epoll_ctl.
@@ -66,7 +89,7 @@
 (define *default-epoll-event* (list 0 *default-epoll-data*))
 (define epoll-event-size (c/struct-sizeof epoll-event-meta))
 (define-public (make-epoll-event fd events)
-  (list events (%null-pointer fd 0 0)))
+  (list events (list %null-pointer fd 0 0)))
 (define (parse-epoll-event e)
   (parse-c-struct epoll-event-meta e))
 
@@ -140,7 +163,7 @@
 
 ;; NOTE: do NOT use this function outside this module!!!
 (define (epoll-event-set->list ees len)
-  (parse-c-struct ees (make-list len *default-epoll-event*)))
+  (parse-c-struct ees (make-list len epoll-event-meta)))
 
 ;; Wait for events on an epoll instance "epfd". Returns the number of
 ;; triggered events returned in "events" buffer. Or -1 in case of
@@ -172,7 +195,7 @@
                       (dynamic-func "epoll_pwait" (dynamic-link))
                       (list int '* int int '*)))
 
-(define-public (epoll-pwait epfd events timeout sigmask)
+(define-public (epoll-pwait epfd events maxevents timeout sigmask)
   (let* ((maxevents (get-conf '(server workqueue maxlen)))
          (ret (%epoll-pwait epfd events maxevents timeout sigmask))
          (err (errno)))
