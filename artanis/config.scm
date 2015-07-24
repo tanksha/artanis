@@ -51,6 +51,7 @@
     ((server nginx) #f)
     ((server charset) "utf-8")
     ((server syspage path) "/etc/artanis/pages")
+    ((server backlog) 128)
     ((server workers) 1)
     ((server workqueue maxlen) 64)
 
