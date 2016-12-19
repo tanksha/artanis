@@ -1,5 +1,5 @@
 ;;  -*-  indent-tabs-mode:nil; coding: utf-8 -*-
-;;  Copyright (C) 2014,2015
+;;  Copyright (C) 2014,2015,2016
 ;;      "Mu Lei" known as "NalaGinrut" <NalaGinrut@gmail.com>
 ;;  Artanis is free software: you can redistribute it and/or modify
 ;;  it under the terms of the GNU General Public License and GNU
@@ -46,10 +46,17 @@
             current-dbconn
             current-appname
             change-session-backend!
-            current-session-backend))
+            current-session-backend
+            protocol-add!
+            lookup-protocol
+            current-worker))
 
-;; WARNING: For concurrency in green-thread, all these stuffs should be immutable
-;;          IN THE RUN TIME!!!
+;; WARNING:
+;; For concurrency in green-thread, all these stuffs should be immutable
+;; when the server-core start to work!!!
+;; TODO:
+;; set a global variable when server-core started, and each accessor here
+;; should check it first.
 
 ;; table structure:
 ;; '((rule-handler-key (handler . keys)) ...)
@@ -60,9 +67,10 @@
 
 ;; NOTE: pool size equals to workers (work queues)
 ;; TODO: Should be pool of pool.
-;;       In principle, each worker need just one connection because of green-thread.
-;;       But async needs non-block, so we need a pool for each worker since each conn
-;;       could be scheduled when it encounters EWOULDBREAK.
+;;       In principle, each worker needs just one connection because of
+;;       green-thread. But async needs non-blocking, so we need a pool
+;;       for each worker since each connnection could be scheduled when it
+;;       encounters EWOULDBREAK or EAGAIN.
 (define *conn-pool* #f)
 
 (define *before-response-hook* (make-hook 2))
@@ -102,9 +110,12 @@
 (define draw:is-skip? (make-parameter #f))
 (define draw:is-quiet? (make-parameter #f))
 
+(define *null-device-output-port*
+  (open-input-file *null-device*))
+
 (define (artanis-current-output)
   (if (draw:is-quiet?)
-      (open-output-file *null-device*)
+      *null-device-output-port*
       (current-output-port)))
 
 (define *controllers-table* (make-hash-table))
@@ -116,3 +127,13 @@
 (define *session-backend* #f)
 (define (change-session-backend! x) (set! *session-backend* x))
 (define (current-session-backend) *session-backend*)
+
+(define *proto-table* (make-hash-table))
+
+(define (protocol-add! name proto)
+  (hashq-set! *proto-table* name proto))
+
+(define (lookup-protocol name)
+  (hashq-ref *proto-table* name))
+
+(define current-worker (make-parameter 0))

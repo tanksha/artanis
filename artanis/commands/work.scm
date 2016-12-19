@@ -1,5 +1,5 @@
 ;;  -*-  indent-tabs-mode:nil; coding: utf-8 -*-
-;;  Copyright (C) 2015
+;;  Copyright (C) 2015,2016
 ;;      "Mu Lei" known as "NalaGinrut" <NalaGinrut@gmail.com>
 ;;  Artanis is free software: you can redistribute it and/or modify
 ;;  it under the terms of the GNU General Public License and GNU
@@ -23,6 +23,7 @@
   #:use-module (artanis commands)
   #:use-module (artanis artanis)
   #:use-module (artanis config)
+  #:use-module (artanis server)
   #:use-module (artanis mvc controller)
   #:use-module (artanis mvc model)
   #:use-module (artanis mvc view)
@@ -101,9 +102,11 @@
 (define (init-work)
   (clean-stuffs)
   (add-to-load-path (current-toplevel))
+  (add-to-load-path (string-append (current-toplevel) "/lib"))
   (try-load-app)
   (register-rules)
-  (load-rules))
+  (load-rules)
+  (init-server-core))
 
 (define (work . args)
   (let ((options (if (null? args) '() (getopt-long args option-spec))))

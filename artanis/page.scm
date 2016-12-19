@@ -19,18 +19,20 @@
 
 (define-module (artanis page)
   #:use-module (artanis utils)
+  #:use-module (artanis env)
   #:use-module (artanis config)
   #:use-module (artanis cookie)
   #:use-module (artanis tpl)
   #:use-module (artanis tpl sxml)
   #:use-module (artanis db)
   #:use-module (artanis route)
-  #:use-module (artanis env)
+  #:use-module (artanis websocket)
   #:use-module (srfi srfi-19)
   #:use-module (web uri)
   #:use-module (web request)
   #:use-module (web response)
   #:use-module (web http)
+  #:use-module (ice-9 match)
   #:export (params
             response-emit
             throw-auth-needed
@@ -91,7 +93,7 @@
   (run-hook *before-response-hook* rc body))
 
 (define (init-after-request-hook)
- #t) ; nothing to do.
+  (run-after-request! detect-if-connecting-websocket))
 
 (define (init-before-response-hook)
   (run-before-response! rc-conn-recycle))
@@ -135,15 +137,29 @@
     (lambda ()
       (let* ((rc (new-route-context request body))
              (handler (rc-handler rc)))
-        (if handler 
+        (if handler
             (handler-render handler rc)
             (render-sys-page 404 rc))))
     (lambda (k . e)
-      (let ((status (car e))
-            (reason (cadr e))
-            (info (caddr e)))
-        (format (current-error-port) "[ERR Reason]: ~a ~a~%" reason info)
-        (format-status-page status request)))))
+      (define port (current-error-port))
+      (format port (ERROR-TEXT "GNU Artanis encountered exception!~%"))
+      (match e
+        (((? procedure? subr) (? string? msg) . args)
+         (format port "<~a>~%" (WARN-TEXT (current-filename)))
+         (when subr (format port "In procedure ~a :~%" (WARN-TEXT subr)))
+         (apply format port (REASON-TEXT msg) args))
+        (((? integer? status) (? procedure? subr) ? string? msg . args)
+         (format port "HTTP ~a~%" (STATUS-TEXT status))
+         (format port "<~a>~%" (WARN-TEXT (current-filename)))
+         (when subr (format port "In procedure ~a :~%" (WARN-TEXT subr)))
+         (apply format port (REASON-TEXT msg) args)
+         (format-status-page status request))
+        (else
+         (format port "~a - ~a~%"
+                 (WARN-TEXT
+                  "BUG: invalid exception format, but we throw it anyway!")
+                 e)
+         (apply throw k e))))))
 
 (define (response-emit-error status)
   (response-emit "" #:status status))
@@ -157,7 +173,10 @@
           #:mtime (generate-modify-time mtime)))
 
 (define (throw-auth-needed)
-  (response-emit "" #:status 401 #:headers '((WWW-Authenticate . "Basic realm=\"Secure Area\""))))
+  (response-emit
+   ""
+   #:status 401
+   #:headers '((WWW-Authenticate . "Basic realm=\"Secure Area\""))))
 
 (define (server-handler request request-body)
   ;; ENHANCE: could put some stat hook here
@@ -173,7 +192,7 @@
              (port (open-input-file filename))
              (mime (guess-mime filename)))
         (values mtime 200 (proc port) mime))
-      (throw 'artanis-err 404 "Static file doesn't exist:" filename)))
+      (throw 'artanis-err 404 "Static file `~a' doesn't exist!~%" filename)))
 
 ;; emit static file with no cache(ETag)
 (define* (emit-response-with-file filename #:optional (headers '()))

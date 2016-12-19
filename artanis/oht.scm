@@ -64,7 +64,8 @@
             :mime
             :auth
             :session
-            :from-post))
+            :from-post
+            :websocket))
 
 (define (define-handler method rule opts-and-handler)
   (let ((keys (rule->keys rule))
@@ -217,16 +218,16 @@
 
 ;; for #:mime
 (define (mime-maker type rule keys)
-  (define mime (mime-guess type))
-  (lambda (rc . args)
-    (define headers `((content-type . (,(mime-guess type)))))
-    (define-syntax-rule (-> func) (values (apply func args) #:pre-headers headers))
-    (case type
-      ((json jsonp) (-> ->json-string))
-      ((xml) (-> sxml->xml-string))
-      ((csv) (-> sxml->csv-string))
-      ((sxml) (values (object->string (car args)) #:pre-headers headers))
-      (else (throw 'artanis-err 500 "mime-maker: Invalid type!" type)))))
+  (define headers `((content-type . (,(mime-guess type)))))
+  (define-syntax-rule (-> func the-args) (values (apply func the-args) #:pre-headers headers))
+  (define gen-mime
+   (case type
+     ((json jsonp) (lambda (args) (-> ->json-string args)))
+     ((xml) (lambda (args) (-> sxml->xml-string args)))
+     ((csv) (lambda (args) (-> sxml->csv-string args)))
+     ((sxml) (lambda (args) (values (object->string (car args)) #:pre-headers headers)))
+     (else (throw 'artanis-err 500 "mime-maker: Invalid type!" type))))
+  (lambda (rc . args) (gen-mime args)))
 
 ;; for #:session
 (define (session-maker mode rule keys)
@@ -237,11 +238,11 @@
         (let ((cookie (new-cookie #:npv `((,idname . ,sid)))))
           (and cookie (rc-set-cookie! rc (list cookie)))
           sid))))
-  (define* (spawn-handler rc #:key (keep? #f))
+  (define spawn-handler
     (match mode
-      ((or #t 'spawn) (%spawn rc))
-      (`(spawn ,sid) (%spawn rc #:idname sid))
-      (`(spawn ,sid ,proc) (%spawn rc #:idname sid #:proc proc))
+      ((or #t 'spawn) %spawn)
+      (`(spawn ,sid) (lambda (rc) (%spawn rc #:idname sid)))
+      (`(spawn ,sid ,proc) (lambda (rc) (%spawn rc #:idname sid #:proc proc)))
       (else (throw 'artanis-err 500 "session-maker: Invalid config mode" mode))))
   (define (check-it rc idname)
     (let ((sid (cookie-ref (rc-cookie rc) idname)))
@@ -259,14 +260,10 @@
       (else (throw 'artanis-err 500 "session-maker: Invalid call cmd" cmd)))))
 
 (define (from-post-maker mode rule keys)
-  (define post-data #f)
   (define* (post->qstr-table rc #:optional (safe? #f))
-    (when (not post-data)
-      (set! post-data
-            (if (rc-body rc)
-                (generate-kv-from-post-qstr (rc-body rc) #:no-evil? safe?)
-                '())))
-    post-data)
+    (if (rc-body rc)
+        (generate-kv-from-post-qstr (rc-body rc) #:no-evil? safe?)
+        '()))
   (define (default-success-ret size-list filename-list)
     (call-with-output-string
      (lambda (port)
@@ -301,12 +298,49 @@
       ;; upload operation, indeed
       (('store rest ...) (apply store-the-bv rc rest))
       (else (throw 'artanis-err 500 "post-handler: Invalid mode!" mode))))
+  (define (get-values-from-post pl . keys)
+    (apply
+     values
+     (map
+      (lambda (k) (post-ref pl k))
+      keys)))
   (lambda (rc . cmd)
     (match cmd
       (`(get ,key) (post-ref (post-handler rc) key))
-      ('(get) (rc-body rc))
+      ('(get) (post-handler rc))
+      (('get-vals keys ...) (apply get-values-from-post (post-handler rc) keys))
       ('(store) (post-handler rc))
       (else (throw 'artanis-err 500 "from-post-maker: Invalid cmd!" cmd)))))
+
+;; for #:websocket
+;; 
+(define (websocket-maker type rule keys)
+  (define (call-with-websocket-channel args)
+    (match args
+      (('proto (? symbol? proto))
+       ;; TODO: call protocol initilizer, and establish websocket for it.
+       #t)
+      (('redirect (? string? ip/usk))
+       ;; NOTE: We use IP rather than hostname, since it's usually redirected to
+       ;;       an inner address. Using hostname may cause DNS issues.
+       ;; NOTE: ip/usk means ip or unix-socket, the pattern should be this:
+       ;;       ^ip://(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(:[0-9]{1,5})?$
+       ;;       ^unix://[a-zA-Z-_0-9]+\\.socket$
+       ;; NOTE: Equivalent to transparent proxy.
+       ;; TODO: call protocol initilizer, and establish websocket
+       ;;       to redirect it.
+       #t)
+      (('proxy (? symbol? proto))
+       ;; NOTE: Setup a proxy with certain protocol handler.
+       ;;       Different from the regular proxy design, the proxy in Artanis doesn't
+       ;;       need a listen port, since it's always 80/443. The client should
+       ;;       support websocket, and visit the relative URL for establishing
+       ;;       a websocket channel. Then the rest is the same with regular proxy.
+       #t)
+      (else (throw 'artanis-err 500 websocket-maker "Invalid type!" type))))
+  (lambda (rc . args)
+    ;; TODO: parsing command and apply call-with-websocket-channel
+    #t))
 
 ;; ---------------------------------------------------------------------------------
   
@@ -317,6 +351,8 @@
 ;; CONVENTION:
 ;; 1. When a var is arounded with ${..}, and there's ":" as its prefix,
 ;;    say, ${:xxx}, it means "to get xxx from rule key".
+;; 2. Arounded with ${..}, and there's "@" as its prefix, say, ${@xxx},
+;;    it means "to get xxx from body" (POST way).
 (define *options-meta-handler-table*
   `(;; a short way for sql-mapping from the bindings in rule
     ;; e.g #:sql-mapping "select * from table where id=${:id}"
@@ -428,7 +464,31 @@
     (#:session . ,session-maker)
 
     ;; Get data from POST
-    (#:from-post . ,from-post-maker)))
+    (#:from-post . ,from-post-maker)
+
+    ;; Establish websocket channel
+    ;; Each time developers set :websocket and specifed a protocol, say, `myproto',
+    ;; Artanis will check if the file app/protocols/myproto.scm exists, then load
+    ;; the protocol initialize function in `myproto' which will also add `myproto'
+    ;; into *proto-table*. Then ragnarok will take charge of it to call the correct
+    ;; handlers.
+    ;; There're 3 cases:
+    ;; 1. Regular protocol handling over websocket
+    ;;    The initializer will create an instance for the protocol.
+    ;; 2. Redirect to another address (IP or UNIX socket)
+    ;;    The initializer will create a binding pair in redirect table:
+    ;;    src port and des port.
+    ;;    In this case, there's no protocol handling in Artanis. The protocol handler
+    ;;    is in remote (could be a host machine, or a process in current OS).
+    ;; 3. Proxy mode:
+    ;;    Different from reguar proxy, the proxy in Artanis runs over websocket, and
+    ;;    there's no extra listenning port, only 80/443.
+    ;;    In this case, there're 2 situations:
+    ;;    a. transparent proxy
+    ;;       No protocol handling at all, just redirecting the data without cooking.
+    ;;    b. cooked proxy
+    ;;       There's a bound protocol instance for it.
+    (#:websocket . ,websocket-maker)))
 
 (define-macro (meta-handler-register what)
   `(define-syntax-rule (,(symbol-append ': what) rc args ...)
@@ -446,6 +506,7 @@
 (meta-handler-register auth)
 (meta-handler-register session)
 (meta-handler-register from-post)
+(meta-handler-register websocket)
 
 (define-syntax-rule (:cookies-set! rc ck k v)
   ((:cookies rc 'set) ck k v))

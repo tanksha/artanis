@@ -1,5 +1,5 @@
 ;;  -*-  indent-tabs-mode:nil; coding: utf-8 -*-
-;;  Copyright (C) 2013,2014,2015
+;;  Copyright (C) 2013,2014,2015,2016
 ;;      "Mu Lei" known as "NalaGinrut" <NalaGinrut@gmail.com>
 ;;  Artanis is free software: you can redistribute it and/or modify
 ;;  it under the terms of the GNU General Public License and GNU
@@ -59,10 +59,15 @@
     ((server workers) 1)
     ((server wqlen) 64) ; work queue maxlen
     ((server trigger) edge)
+    ((server engine) ragnarok)
+    ((server polltimeout) 500) ; in miliseconds
+    ;; From "HOP, A Fast Server for the Diffuse Web", Serrano.
+    ((server bufsize) 12288) ; in Bytes
 
     ;; for host namespace
     ((host name) #f)
     ((host addr) "127.0.0.1")
+
     ((host port) 3000)
     ((host family) ipv4)
 
@@ -78,7 +83,7 @@
     ;; ((mail sender) "/usr/sbin/sendmail")
 
     ;; for cache namespace
-    ((cache maxage) 3600)
+    ((cache maxage) 3600) ; in seconds
 
     ;; for debug mode
     ((debug monitor) ""))) ; user specified monitoring paths
@@ -136,7 +141,10 @@
     (('workers workers) (conf-set! '(server workers) (->integer workers)))
     (('backlog backlog) (conf-set! '(server backlog) (->integer backlog)))
     (('wqlen wqlen) (conf-set! '(server wqlen) (->integer wqlen)))
-    (('trigger trigger) (conf-set! '(server trigger) trigger))
+    (('trigger trigger) (conf-set! '(server trigger) (string->symbol trigger)))
+    (('polltimeout polltimeout) (conf-set! '(server polltimeout) (->integer polltimeout)))
+    (('bufsize bufsize) (conf-set! '(server bufsize) (->integer bufsize)))
+    (('impl impl) (conf-set! '(server impl) (string->symbol impl)))
     (else (error parse-namespace-server "Config: Invalid item" item))))
 
 (define (parse-namespace-host item)

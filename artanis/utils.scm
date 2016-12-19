@@ -37,15 +37,17 @@
   #:use-module (ice-9 local-eval)
   #:use-module (ice-9 receive)
   #:use-module (ice-9 q)
+  #:use-module (ice-9 control)
   #:use-module (web http)
   #:use-module (web request)
   #:use-module ((rnrs)
                 #:select (get-bytevector-all utf8->string put-bytevector
                           bytevector-u8-ref string->utf8 bytevector-length
-                          make-bytevector bytevector-s32-native-ref))
-  #:export (regexp-split hash-keys cat bv-cat get-global-time
-            get-local-time string->md5 unsafe-random string-substitute
-            get-file-ext get-global-date get-local-date uri-decode
+                          make-bytevector bytevector-s32-native-ref bytevector?
+                          define-record-type record-rtd record-accessor))
+  #:export (regexp-split hash-keys cat bv-cat get-global-time sanitize-response
+            build-response get-local-time string->md5 unsafe-random uri-decode
+            get-file-ext get-global-date get-local-date string-substitute
             nfx static-filename remote-info seconds-now local-time-stamp
             parse-date write-date make-expires export-all-from-module!
             alist->hashtable expires->time-utc local-eval-string
@@ -70,7 +72,10 @@
             subbv->string subbv=? bv-read-line bv-read-delimited put-bv
             bv-u8-index bv-u8-index-right build-bv-lookup-table filesize
             plist-remove gen-migrate-module-name try-to-load-migrate-cache
-            flush-to-migration-cache gen-local-conf-file with-dbd errno)
+            flush-to-migration-cache gen-local-conf-file with-dbd errno
+            call-with-sigint define-box-type make-box-type unbox-type
+            ::define did-not-specify-parameter WARN-TEXT ERROR-TEXT REASON-TEXT
+            NOTIFY-TEXT STATUS-TEXT get-trigger get-family get-addr)
   #:re-export (the-environment))
 
 ;; There's a famous rumor that 'urandom' is safer, so we pick it.
@@ -86,6 +91,8 @@
 (define uri-decode (@ (web uri) uri-decode))
 (define parse-date (@@ (web http) parse-date))
 (define write-date (@@ (web http) write-date))
+(define sanitize-response (@ (web server) sanitize-response))
+(define build-response (@ (web response) build-response))
 
 (define-syntax-rule (local-eval-string str e)
   (local-eval 
@@ -454,8 +461,7 @@
             item
             (or (and=> (get-the-val keyword-args (car item)) ->string)
                 (cdr item) ; default value
-                (throw 'artanis-err 500
-                       "(utils)item->string: Missing keyword" (car item)))))
+                "")))
       (string-concatenate (map item->string items)))))
 
 ;; the normal mode, no double quotes for vals
@@ -996,3 +1002,180 @@
 (define-syntax-rule (DEBUG fmt args ...)
   (when (get-conf 'debug-mode)
         (format (artanis-current-output) fmt args ...)))
+
+(define call-with-sigint
+  (if (not (provided? 'posix))
+      (lambda (thunk handler-thunk) (thunk))
+      (lambda (thunk handler-thunk)
+        (let ((handler #f))
+          (catch 'interrupt
+            (lambda ()
+              (dynamic-wind
+                (lambda ()
+                  (set! handler
+                        (sigaction SIGINT (lambda (sig) (throw 'interrupt)))))
+                thunk
+                (lambda ()
+                  (if handler
+                      ;; restore Scheme handler, SIG_IGN or SIG_DFL.
+                      (sigaction SIGINT (car handler) (cdr handler))
+                      ;; restore original C handler.
+                      (sigaction SIGINT #f)))))
+            (lambda (k . _) (handler-thunk)))))))
+
+(define-syntax-rule (define-box-type name)
+  (define-record-type name (fields treasure)))
+
+(define-macro (make-box-type bt v)
+  (list (symbol-append 'make- bt) v))
+
+(define-syntax-rule (box-type-treasure t)
+  (record-accessor (record-rtd t) 0))
+
+(define-syntax-rule (unbox-type t)
+  (let ((treasure-getter (box-type-treasure t)))
+    (treasure-getter t)))
+
+(define (socket-port? sp)
+  (and (port? sp) (eq? (port-filename sp) 'socket)))
+
+(define (detect-type-name o)
+  (cond
+   ;; NOTE: record? is for R6RS record-type, but record-type? is not
+   ((record? o) (record-type-name (record-rtd o)))
+   ((symbol? o) 'symbol)
+   ((string? o) 'string)
+   ((integer? o) 'int)
+   ((number? o) 'number)
+   ((thunk? o) 'thunk)
+   ((procedure? o) 'proc)
+   ((vector? o) 'vector)
+   ((bytevector? o) 'bv)
+   ((socket-port? o) 'socket)
+   ((boolean? o) 'boolean)
+   (else 'ANY)))
+
+(define (check-args-types op args)
+  (match (procedure-property op 'type-anno)
+    (((targs ...) '-> (func-types ...))
+     (for-each
+      (lambda (v e)
+        (or (eq? (detect-type-name v) e)
+            (throw 'artanis-err 500
+                   (format #f "Argument ~a(~a) is expected to be type `~a'"
+                           v (detect-type-name v) e))))
+      args targs))
+    (else (throw 'artanis-err 500 "Invalid type annotation"
+                 (procedure-property op 'type-anno)))))
+
+(define (check-function-types op fret)
+  (match (procedure-property op 'type-anno)
+    (((targs ...) '-> (func-types ...))
+     (for-each
+      (lambda (v e)
+        (or (eq? (detect-type-name v) e)
+            (throw 'artanis-err 500
+                   (format #f "`Return value ~a(~a) is expected to be type `~a'"
+                           v (detect-type-name v) e))))
+      fret func-types))
+    (else (throw 'artanis-err 500 "Invalid type annotation"
+                 (procedure-property op 'type-anno)))))
+
+(define (detect-and-set-type-anno! op ftypes atypes)
+  (let ((type `(,atypes -> ,ftypes)))
+    (set-procedure-property! op 'type-anno type)
+    type))
+
+;; NOTE: This macro can detect multi return values.
+;; TODO:
+;; 1. support multi-types, say, string/bv, maybe not easy to do it faster?
+(define-syntax ::define
+  (syntax-rules (-> :anno:)
+    ((_ (op args ...) (:anno: (targs ...) -> func-types ...) body ...)
+     (begin
+       (define (op args ...)
+         (when (get-conf 'debug-mode) (check-args-types op (list args ...)))
+         (call-with-values
+             (lambda () body ...)
+           (lambda ret
+             (when (get-conf 'debug-mode)
+                   (eq? (detect-type-name ret) (check-function-types op ret)))
+             (apply values ret))))
+       (detect-and-set-type-anno! op '(func-types ...) '(targs ...))))))
+
+(define-syntax-rule (did-not-specify-parameter what)
+  (lambda ()
+    (throw 'artanis-err 500
+           (format #f "`current-~a' isn't specified, it's likely a bug!" what))))
+
+;; Text-coloring helper functions, borrowed from guile-colorized
+(define *color-list*
+  `((CLEAR       .   "0")
+    (RESET       .   "0")
+    (BOLD        .   "1")
+    (DARK        .   "2")
+    (UNDERLINE   .   "4")
+    (UNDERSCORE  .   "4")
+    (BLINK       .   "5")
+    (REVERSE     .   "6")
+    (CONCEALED   .   "8")
+    (BLACK       .  "30")
+    (RED         .  "31")
+    (GREEN       .  "32")
+    (YELLOW      .  "33")
+    (BLUE        .  "34")
+    (MAGENTA     .  "35")
+    (CYAN        .  "36")
+    (WHITE       .  "37")
+    (ON-BLACK    .  "40")
+    (ON-RED      .  "41")
+    (ON-GREEN    .  "42")
+    (ON-YELLOW   .  "43")
+    (ON-BLUE     .  "44")
+    (ON-MAGENTA  .  "45")
+    (ON-CYAN     .  "46")
+    (ON-WHITE    .  "47")))
+
+(define (get-color color)
+  (assq-ref *color-list* color))
+
+(define (generate-color colors)
+  (let ((color-list
+         (filter-map get-color colors)))
+    (if (null? color-list)
+        ""
+        (string-append "\x1b[" (string-join color-list ";" 'infix) "m"))))
+
+(define* (colorize-string-helper color str control #:optional (rl-ignore #f))
+  (if rl-ignore
+      (string-append "\x01" (generate-color color) "\x02" str "\x01" (generate-color control) "\x02")
+      (string-append (generate-color color) str (generate-color control))))
+
+(define* (colorize-string str color)
+  "Example: (colorize-string \"hello\" '(BLUE BOLD))" 
+  (colorize-string-helper color str '(RESET) (using-readline?)))
+
+(define-syntax-rule (WARN-TEXT str) (colorize-string str '(YELLOW)))
+(define-syntax-rule (ERROR-TEXT str) (colorize-string str '(RED)))
+(define-syntax-rule (REASON-TEXT str) (colorize-string str '(CYAN)))
+(define-syntax-rule (NOTIFY-TEXT str) (colorize-string str '(WHITE)))
+(define-syntax-rule (STATUS-TEXT num) (colorize-string (object->string num)'(WHITE)))
+
+(define (get-trigger)
+  (case (get-conf '(server trigger))
+    ((edge) (@ (ragnarok server epoll) EPOLLET))
+    ((level) 0)
+    (else (throw 'artanis-err 500 "Invalid (server trigger)!"
+                 (get-conf '(server trigger))))))
+
+(define (get-family)
+  (case (get-conf '(host family))
+    ((ipv4) AF_INET)
+    ((ipv6) AF_INET6)
+    (else (throw 'artanis-err 500 "Invalid (host family)!"
+                 (get-conf '(host family))))))
+        
+(define (get-addr)
+  (let ((host (get-conf '(host addr)))
+        (family (get-family)))
+    (inet-pton family host)))

@@ -25,15 +25,10 @@ texinfo.tex
 *~
 ,*
 aclocal.m4
-confdefs.h
 config.build-subdirs
 config.cache
-config.h
 config.status
-conftest
-conftest.c
 depcomp
-ltconfig
 mdate-sh
 missing
 mkinstalldirs
@@ -63,8 +58,6 @@ cscope.files
 *.d
 !artanis/commands/version.scm
 artanis/version.scm
-*.m4
-m4/
 ltmain.sh
 libtool
 examples/upload

@@ -33,6 +33,7 @@
   #:use-module (artanis debug)
   #:use-module (artanis third-party csv)
   #:use-module (artanis third-party json)
+  #:use-module (artanis server)
   #:use-module (artanis version)
   #:use-module (web server)
   #:use-module (srfi srfi-1)
@@ -310,10 +311,9 @@
   (run-hook *before-run-hook*)
   (format #t "~a~%" (current-myhost))
   (format #t "Anytime you want to Quit just try Ctrl+C, thanks!~%")
-  (run-server
-   (if debug
-       (lambda (r b)
-         (format #t "[Request] ~a~%[Body] ~a~%" r (->proper-body-display b))
-         (server-handler r b))
-       server-handler)
-   'http `(#:host ,(get-conf '(host addr)) #:port ,(get-conf '(host port)))))
+  (let ((handler (if debug
+                     (lambda (r b)
+                       (format #t "[Request] ~a~%[Body] ~a~%" r (->proper-body-display b))
+                       (server-handler r b))
+                     server-handler)))
+    (establish-http-gateway handler)))
